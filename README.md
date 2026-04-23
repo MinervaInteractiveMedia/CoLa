@@ -19,6 +19,7 @@
 - [Presentation Structure](#presentation-structure)
 - [Audience Exercise — Building the Dataset Together](#audience-exercise--building-the-dataset-together)
 - [Technical Research — Running Local LLMs](#technical-research--running-local-llms)
+  - [Setting Up a Local LLM Server on Debian](#setting-up-a-local-llm-server-on-debian)
   - [Running Claude Code with Local LLMs (Ollama + LiteLLM)](#running-claude-code-with-local-llms-ollama--litellm)
 - [Project Timeline](#project-timeline)
 - [Open Questions](#open-questions)
@@ -118,6 +119,189 @@ Entries are gathered onto a shared surface — a whiteboard, a live slide, a phy
 ## Technical Research — Running Local LLMs
 
 The sections above make the argument for local AI systems in art education. The sections below document the practical work of actually running one — specifically, research into using Claude Code (an agentic coding interface) with fully local model infrastructure, so that no data leaves the local network.
+
+---
+
+## Setting Up a Local LLM Server on Debian
+
+> Based on the [llm-server-docs guide by varunvasudeva1](https://github.com/varunvasudeva1/llm-server-docs). This documents the in-house Debian server setup running Ollama + Open WebUI as a locally accessible chat interface for the institution.
+
+This is the foundation layer of the CoLa infrastructure: a physical server on the local network running open-source models, accessible through a browser interface — with no data leaving the building.
+
+### Stack
+
+| Component | Tool | Purpose |
+|---|---|---|
+| OS | Debian (stable) | Stable, well-supported Linux base |
+| Inference engine | Ollama | Runs local model files, OpenAI-compatible API |
+| Chat interface | Open WebUI | Browser-based UI accessible across the local network |
+| Web search | SearXNG | Private, self-hosted metasearch engine for grounding model responses |
+| Network access | Tailscale | Secure remote access without exposing the server publicly |
+| Container runtime | Docker | Isolates and manages all services |
+
+### Architecture
+
+```
+Browser (any device on network)
+        │
+        ▼
+  Open WebUI :3000
+        │
+        ├──► Ollama :11434  ──►  Local LLM (qwen, llama, mistral, etc.)
+        │
+        └──► SearXNG :5050  ──►  Web search results (no tracking)
+```
+
+### Hardware used
+
+The setup runs on an in-house server. For reference, the guide was built around:
+
+- CPU: Intel Core i5-12600KF
+- RAM: 96GB DDR4
+- GPU: 2× Nvidia RTX 3090 (24GB each)
+- Storage: 1TB NVMe SSD
+
+For a smaller institutional setup (single user or light concurrent use), a single RTX 3090 or equivalent AMD GPU with 24GB VRAM is sufficient for 14–32B models.
+
+### Setup overview
+
+Full step-by-step instructions are in the [upstream guide](https://github.com/varunvasudeva1/llm-server-docs). The steps below summarise what was followed for this deployment.
+
+#### 1. Install Debian and GPU drivers
+
+Fresh Debian install, then Nvidia CUDA drivers:
+
+```bash
+sudo apt update && sudo apt upgrade
+sudo apt install linux-headers-amd64
+sudo apt install nvidia-driver firmware-misc-nonfree
+# Reboot, then verify:
+nvidia-smi
+```
+
+#### 2. Install Docker
+
+```bash
+sudo apt install ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+# Add your user to the docker group to avoid needing sudo on every command:
+sudo usermod -aG docker $USER
+```
+
+Install Nvidia Container Toolkit so Docker containers can access the GPU:
+
+```bash
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+sudo apt install -y nvidia-container-toolkit
+sudo systemctl restart docker
+```
+
+Create a shared Docker network for all services to communicate:
+
+```bash
+docker network create app-net
+```
+
+#### 3. Install Ollama
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+# Expose Ollama to the local network (not just localhost):
+systemctl edit ollama.service
+# Add under [Service]:
+# Environment="OLLAMA_HOST=0.0.0.0"
+systemctl daemon-reload && systemctl restart ollama
+```
+
+Pull a model to test:
+
+```bash
+ollama pull qwen2.5:14b
+ollama run qwen2.5:14b
+```
+
+#### 4. Install Open WebUI
+
+```bash
+# With Nvidia GPU support:
+docker run -d -p 3000:8080 \
+  --network app-net \
+  --gpus all \
+  --add-host=host.docker.internal:host-gateway \
+  -v open-webui:/app/backend/data \
+  --name open-webui \
+  --restart always \
+  ghcr.io/open-webui/open-webui:cuda
+```
+
+Access at `http://localhost:3000` or `http://<server_ip>:3000` from any device on the same network.
+
+#### 5. Install SearXNG (optional but recommended)
+
+Gives the model the ability to search the web without sending queries to Google, Bing, or similar:
+
+```bash
+docker pull searxng/searxng
+docker run -d -p 5050:8080 \
+  --name searxng \
+  --network app-net \
+  -v "${PWD}/searxng:/etc/searxng" \
+  -e "BASE_URL=http://0.0.0.0:5050/" \
+  -e "INSTANCE_NAME=searxng" \
+  --restart unless-stopped \
+  searxng/searxng
+```
+
+Add JSON format support by editing `searxng/settings.yml`:
+
+```yaml
+search:
+  formats:
+    - html
+    - json
+```
+
+Then connect it in Open WebUI under `Admin Panel > Settings > Web Search`.
+
+#### 6. Set a startup script
+
+Create `init.bash` to run at boot (sets GPU power limit and starts services):
+
+```bash
+#!/bin/bash
+sudo nvidia-smi -pm 1
+sudo nvidia-smi -pl 250   # adjust wattage as needed
+```
+
+Schedule it via crontab: `@reboot /path/to/init.bash`
+
+#### 7. Remote access via Tailscale (optional)
+
+Tailscale creates a private VPN tunnel so the server is reachable from outside the institution's network without exposing any ports publicly:
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up --ssh
+```
+
+Once connected, the server is reachable at its Tailscale IP from any enrolled device, even off-campus.
+
+### Security notes
+
+The upstream guide includes detailed Docker hardening steps — running containers under a non-root user, dropping unnecessary capabilities, limiting resource access, and mounting volumes as read-only where possible. For an institutional setup where the server is accessible across a network, these are worth implementing. See the [hardening section](https://github.com/varunvasudeva1/llm-server-docs#harden-docker-containers) of the upstream guide.
+
+Firewall setup with UFW:
+
+```bash
+sudo apt install ufw
+# Allow SSH and Open WebUI only to your local network range:
+sudo ufw allow from <your_network_range> to any port 22 proto tcp
+sudo ufw allow from <your_network_range> to any port 3000 proto tcp
+sudo ufw enable
+```
 
 ---
 
@@ -331,7 +515,28 @@ Phase 2 — Presentation development
   - Contrasting/friction-based AI design
 
 
-Phase 3 — Technical feasibility research
+Phase 3a — In-house server deployment (Debian)
+──────────────────────────────────────────────────────
+  Set up a physical in-house server on the institution's local
+  network running open-source models via Ollama + Open WebUI.
+  Based on the llm-server-docs guide (varunvasudeva1/llm-server-docs).
+
+  Stack deployed:
+  - Debian OS on in-house hardware (2× RTX 3090)
+  - Docker for service isolation and management
+  - Ollama as inference engine (OpenAI-compatible API)
+  - Open WebUI as browser-based chat interface
+  - SearXNG for private, self-hosted web search
+  - Tailscale for secure remote access off-campus
+
+  Key outcomes:
+  - Fully local setup: no data leaves the building
+  - Accessible from any device on the institution's network
+  - Models can be swapped and updated without external dependency
+  - Remote access enabled via Tailscale VPN tunnel
+
+
+Phase 3b — Technical feasibility research
 ──────────────────────────────────────────────────────
   Investigate whether local model infrastructure can realistically
   replace commercial API dependency for an institutional setup.
