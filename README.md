@@ -157,11 +157,11 @@ Browser (any device on network)
 The setup runs on an in-house server. For reference, the guide was built around:
 
 - CPU: Intel Core i5-12600KF
-- RAM: 96GB DDR4
-- GPU: 2× Nvidia RTX 3090 (24GB each)
+- RAM: 32GB DDR4
+- GPU: 1× Nvidia RTX 3080 (24GB VRAM)
 - Storage: 1TB NVMe SSD
 
-For a smaller institutional setup (single user or light concurrent use), a single RTX 3090 or equivalent AMD GPU with 24GB VRAM is sufficient for 14–32B models.
+For a smaller institutional setup (single user or light concurrent use), a single RTX 3080 or equivalent AMD GPU with 24GB VRAM is sufficient for 14–32B models.
 
 ### Setup overview
 
